@@ -245,7 +245,6 @@ int16_t pcie_sriov_pf_init_from_user_created_vfs(PCIDevice *dev,
     PCIDevice **vfs;
     BusState *bus = qdev_get_parent_bus(DEVICE(dev));
     uint16_t ven_id = pci_get_word(dev->config + PCI_VENDOR_ID);
-    uint16_t size = PCI_EXT_CAP_SRIOV_SIZEOF;
     uint16_t vf_dev_id;
     uint16_t vf_offset;
     uint16_t vf_stride;
@@ -312,11 +311,6 @@ int16_t pcie_sriov_pf_init_from_user_created_vfs(PCIDevice *dev,
         return -1;
     }
 
-    if (!pcie_find_capability(dev, PCI_EXT_CAP_ID_ARI)) {
-        pcie_ari_init(dev, offset + size);
-        size += PCI_ARI_SIZEOF;
-    }
-
     for (i = 0; i < pf->len; i++) {
         vfs[i]->exp.sriov_vf.pf = dev;
         vfs[i]->exp.sriov_vf.vf_number = i;
@@ -337,7 +331,7 @@ int16_t pcie_sriov_pf_init_from_user_created_vfs(PCIDevice *dev,
         }
     }
 
-    return size;
+    return PCI_EXT_CAP_SRIOV_SIZEOF;
 }
 
 bool pcie_sriov_register_device(PCIDevice *dev, Error **errp)

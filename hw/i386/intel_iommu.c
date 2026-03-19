@@ -32,6 +32,7 @@
 #include "hw/i386/apic-msidef.h"
 #include "hw/i386/x86-iommu.h"
 #include "hw/pci-host/q35.h"
+#include "qemu/typedefs.h"
 #include "system/kvm.h"
 #include "system/dma.h"
 #include "system/system.h"
@@ -39,6 +40,15 @@
 #include "kvm/kvm_i386.h"
 #include "migration/vmstate.h"
 #include "trace.h"
+
+// Defines for hardcoded targeted stuck simulation
+#define HACKY_TARGET_STUCK_BDF PCI_BUILD_BDF(1, 0) // Bus 1, Device 0, Function 0
+#define HACKY_TARGET_STUCK_TYPE VTD_INV_DESC_DEVICE // Device-TLB Invalidation
+
+static bool inv_processing_active = false;
+static bool simulate_stuck = false;
+QEMUBH  *inv_bh = NULL;
+QEMUTimer *inv_timer = NULL;
 
 /* context entry operations */
 #define VTD_CE_GET_RID2PASID(ce) \
@@ -2324,7 +2334,7 @@ static uint64_t vtd_iotlb_flush(IntelIOMMUState *s, uint64_t val)
     return iaig;
 }
 
-static void vtd_fetch_inv_desc(IntelIOMMUState *s);
+static void vtd_fetch_inv_desc_locked(IntelIOMMUState *s);
 
 static inline bool vtd_queued_inv_disable_check(IntelIOMMUState *s)
 {
@@ -2336,6 +2346,7 @@ static void vtd_handle_gcmd_qie(IntelIOMMUState *s, bool en)
 {
     uint64_t iqa_val = vtd_get_quad_raw(s, DMAR_IQA_REG);
 
+    fprintf(stderr, "%s %d\n", __func__, __LINE__);
     trace_vtd_inv_qi_enable(en);
 
     if (en) {
@@ -2355,7 +2366,15 @@ static void vtd_handle_gcmd_qie(IntelIOMMUState *s, bool en)
              */
             trace_vtd_warn_invalid_qi_tail(s->iq_tail);
             if (!(vtd_get_long_raw(s, DMAR_FSTS_REG) & VTD_FSTS_IQE)) {
-                vtd_fetch_inv_desc(s);
+                vtd_iommu_lock(s);
+    fprintf(stderr, "%s %d\n", __func__, __LINE__);
+                if (!inv_processing_active) {
+    fprintf(stderr, "%s %d\n", __func__, __LINE__);
+                    inv_processing_active = true;
+                    qemu_bh_schedule(inv_bh);
+                }
+                vtd_iommu_unlock(s);
+                aio_bh_poll();
             }
         }
     } else {
@@ -2777,53 +2796,52 @@ done:
     return true;
 }
 
-static bool vtd_process_inv_desc(IntelIOMMUState *s)
+static bool vtd_process_inv_desc(IntelIOMMUState *s, VTDInvDesc *inv_desc)
 {
-    VTDInvDesc inv_desc;
     uint8_t desc_type;
 
     trace_vtd_inv_qi_head(s->iq_head);
-    if (!vtd_get_inv_desc(s, &inv_desc)) {
-        s->iq_last_desc_type = VTD_INV_DESC_NONE;
-        return false;
-    }
+    // No need to fetch here, it's passed in now
+    // if (!vtd_get_inv_desc(s, &inv_desc)) {
+    //     s->iq_last_desc_type = VTD_INV_DESC_NONE;
+    //     return false;
+    // }
 
-    desc_type = VTD_INV_DESC_TYPE(inv_desc.lo);
-    /* FIXME: should update at first or at last? */
+    desc_type = VTD_INV_DESC_TYPE(inv_desc->lo);
     s->iq_last_desc_type = desc_type;
 
     switch (desc_type) {
     case VTD_INV_DESC_CC:
-        trace_vtd_inv_desc("context-cache", inv_desc.hi, inv_desc.lo);
-        if (!vtd_process_context_cache_desc(s, &inv_desc)) {
+        trace_vtd_inv_desc("context-cache", inv_desc->hi, inv_desc->lo);
+        if (!vtd_process_context_cache_desc(s, inv_desc)) {
             return false;
         }
         break;
 
     case VTD_INV_DESC_IOTLB:
-        trace_vtd_inv_desc("iotlb", inv_desc.hi, inv_desc.lo);
-        if (!vtd_process_iotlb_desc(s, &inv_desc)) {
+        trace_vtd_inv_desc("iotlb", inv_desc->hi, inv_desc->lo);
+        if (!vtd_process_iotlb_desc(s, inv_desc)) {
             return false;
         }
         break;
 
     case VTD_INV_DESC_WAIT:
-        trace_vtd_inv_desc("wait", inv_desc.hi, inv_desc.lo);
-        if (!vtd_process_wait_desc(s, &inv_desc)) {
+        trace_vtd_inv_desc("wait", inv_desc->hi, inv_desc->lo);
+        if (!vtd_process_wait_desc(s, inv_desc)) {
             return false;
         }
         break;
 
     case VTD_INV_DESC_IEC:
-        trace_vtd_inv_desc("iec", inv_desc.hi, inv_desc.lo);
-        if (!vtd_process_inv_iec_desc(s, &inv_desc)) {
+        trace_vtd_inv_desc("iec", inv_desc->hi, inv_desc->lo);
+        if (!vtd_process_inv_iec_desc(s, inv_desc)) {
             return false;
         }
         break;
 
     case VTD_INV_DESC_DEVICE:
-        trace_vtd_inv_desc("device", inv_desc.hi, inv_desc.lo);
-        if (!vtd_process_device_iotlb_desc(s, &inv_desc)) {
+        trace_vtd_inv_desc("device", inv_desc->hi, inv_desc->lo);
+        if (!vtd_process_device_iotlb_desc(s, inv_desc)) {
             return false;
         }
         break;
@@ -2841,19 +2859,37 @@ static bool vtd_process_inv_desc(IntelIOMMUState *s)
     /* fallthrough */
     default:
         error_report_once("%s: invalid inv desc: hi=%"PRIx64", lo=%"PRIx64
-                          " (unknown type)", __func__, inv_desc.hi,
-                          inv_desc.lo);
+                          " (unknown type)", __func__, inv_desc->hi,
+                          inv_desc->lo);
         return false;
     }
     s->iq_head++;
     if (s->iq_head == s->iq_size) {
         s->iq_head = 0;
     }
+
+    return true;
+    vtd_iommu_lock(s);
+    // HACKY STUCK SIMULATION TRIGGER - TARGETED
+    if (!simulate_stuck && desc_type == HACKY_TARGET_STUCK_TYPE) {
+        // Only check BDF for device invalidation type
+        if (desc_type == VTD_INV_DESC_DEVICE) {
+            uint16_t source_id = VTD_INV_DESC_DEVICE_IOTLB_SID(inv_desc->lo);
+            if (source_id == HACKY_TARGET_STUCK_BDF) {
+                simulate_stuck = true;
+                uint64_t delay_ns = 90 * 1000000000ULL; // 90 seconds
+                timer_mod(inv_timer, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + delay_ns);
+                return true; // Return true to advance head, but processing will pause until unstuck
+            }
+        }
+    }
+    vtd_iommu_unlock(s);
+
     return true;
 }
 
 /* Try to fetch and process more Invalidation Descriptors */
-static void vtd_fetch_inv_desc(IntelIOMMUState *s)
+static void vtd_fetch_inv_desc_locked(IntelIOMMUState *s)
 {
     int qi_shift;
 
@@ -2871,7 +2907,15 @@ static void vtd_fetch_inv_desc(IntelIOMMUState *s)
         return;
     }
     while (s->iq_head != s->iq_tail) {
-        if (!vtd_process_inv_desc(s)) {
+        VTDInvDesc inv_desc; // Declare here to access type
+
+        if (!vtd_get_inv_desc(s, &inv_desc)) {
+            s->iq_last_desc_type = VTD_INV_DESC_NONE;
+            vtd_handle_inv_queue_error(s);
+            break;
+        }
+
+        if (!vtd_process_inv_desc(s, &inv_desc)) {
             /* Invalidation Queue Errors */
             vtd_handle_inv_queue_error(s);
             break;
@@ -2894,13 +2938,64 @@ static void vtd_handle_iqt_write(IntelIOMMUState *s)
         vtd_handle_inv_queue_error(s);
         return;
     }
+    fprintf(stderr, "%s %d\n", __func__, __LINE__);
+    vtd_iommu_lock(s);
     s->iq_tail = VTD_IQT_QT(s->iq_dw, val);
     trace_vtd_inv_qi_tail(s->iq_tail);
 
     if (s->qi_enabled && !(vtd_get_long_raw(s, DMAR_FSTS_REG) & VTD_FSTS_IQE)) {
-        /* Process Invalidation Queue here */
-        vtd_fetch_inv_desc(s);
+    fprintf(stderr, "%s %d\n", __func__, __LINE__);
+        if (!inv_processing_active) {
+    fprintf(stderr, "%s %d\n", __func__, __LINE__);
+            inv_processing_active = true;
+            qemu_bh_schedule(inv_bh);
+        }
     }
+    vtd_iommu_unlock(s);
+}
+
+static void vtd_inv_timer_cb(void *opaque)
+{
+    IntelIOMMUState *s = opaque;
+
+    fprintf(stderr, "%s %d\n", __func__, __LINE__);
+    vtd_iommu_lock(s);
+    simulate_stuck = false; // Unstuck
+    vtd_iommu_unlock(s);
+
+    qemu_bh_schedule(inv_bh); // Schedule BH to continue processing
+}
+
+static void vtd_process_inv_bh(void *opaque)
+{
+    IntelIOMMUState *s = opaque;
+
+    fprintf(stderr, "%s %d\n", __func__, __LINE__);
+    vtd_iommu_lock(s);
+
+    if (simulate_stuck) {
+    fprintf(stderr, "%s %d\n", __func__, __LINE__);
+        vtd_iommu_unlock(s);
+        return;
+    }
+
+    vtd_iommu_unlock(s);
+    fprintf(stderr, "%s %d\n", __func__, __LINE__);
+    vtd_fetch_inv_desc_locked(s);
+    fprintf(stderr, "%s %d\n", __func__, __LINE__);
+
+    vtd_iommu_lock(s);
+    if (!simulate_stuck) {
+    fprintf(stderr, "%s %d\n", __func__, __LINE__);
+      if (s->iq_head == s->iq_tail) {
+    fprintf(stderr, "%s %d\n", __func__, __LINE__);
+        inv_processing_active = false;
+      } else {
+    fprintf(stderr, "%s %d\n", __func__, __LINE__);
+        qemu_bh_schedule(inv_bh);
+      }
+    }
+    vtd_iommu_unlock(s);
 }
 
 static void vtd_handle_fsts_write(IntelIOMMUState *s)
@@ -4261,6 +4356,9 @@ static void vtd_reset(DeviceState *dev)
 {
     IntelIOMMUState *s = INTEL_IOMMU_DEVICE(dev);
 
+    qemu_bh_delete(inv_bh);
+    timer_del(inv_timer);
+    timer_free(inv_timer);
     vtd_init(s);
     vtd_address_space_refresh_all(s);
 }
@@ -4403,6 +4501,11 @@ static void vtd_realize(DeviceState *dev, Error **errp)
                                                   g_free, vtd_hiod_destroy);
     vtd_init(s);
     pci_setup_iommu(bus, &vtd_iommu_ops, dev);
+
+    inv_bh = qemu_bh_new(vtd_process_inv_bh, s);
+    inv_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, vtd_inv_timer_cb, s);
+    inv_processing_active = false;
+    simulate_stuck = false;
     /* Pseudo address space under root PCI bus. */
     x86ms->ioapic_as = vtd_host_dma_iommu(bus, s, Q35_PSEUDO_DEVFN_IOAPIC);
     qemu_add_machine_init_done_notifier(&vtd_machine_done_notify);

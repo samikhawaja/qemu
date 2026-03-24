@@ -19,6 +19,7 @@
  * with this program; if not, see <http://www.gnu.org/licenses/>.
  */
 
+#include <stdio.h>
 #include "qemu/osdep.h"
 #include "qemu/error-report.h"
 #include "qemu/main-loop.h"
@@ -2372,9 +2373,9 @@ static void vtd_handle_gcmd_qie(IntelIOMMUState *s, bool en)
     fprintf(stderr, "%s %d\n", __func__, __LINE__);
                     inv_processing_active = true;
                     qemu_bh_schedule(inv_bh);
+    fprintf(stderr, "%s %d\n", __func__, __LINE__);
                 }
                 vtd_iommu_unlock(s);
-                aio_bh_poll();
             }
         }
     } else {
@@ -2949,6 +2950,7 @@ static void vtd_handle_iqt_write(IntelIOMMUState *s)
     fprintf(stderr, "%s %d\n", __func__, __LINE__);
             inv_processing_active = true;
             qemu_bh_schedule(inv_bh);
+    fprintf(stderr, "%s %d\n", __func__, __LINE__);
         }
     }
     vtd_iommu_unlock(s);
@@ -2964,6 +2966,7 @@ static void vtd_inv_timer_cb(void *opaque)
     vtd_iommu_unlock(s);
 
     qemu_bh_schedule(inv_bh); // Schedule BH to continue processing
+    fprintf(stderr, "%s %d\n", __func__, __LINE__);
 }
 
 static void vtd_process_inv_bh(void *opaque)
@@ -2971,10 +2974,12 @@ static void vtd_process_inv_bh(void *opaque)
     IntelIOMMUState *s = opaque;
 
     fprintf(stderr, "%s %d\n", __func__, __LINE__);
+    fflush(stderr);
     vtd_iommu_lock(s);
 
     if (simulate_stuck) {
     fprintf(stderr, "%s %d\n", __func__, __LINE__);
+    fflush(stderr);
         vtd_iommu_unlock(s);
         return;
     }
@@ -2983,6 +2988,7 @@ static void vtd_process_inv_bh(void *opaque)
     fprintf(stderr, "%s %d\n", __func__, __LINE__);
     vtd_fetch_inv_desc_locked(s);
     fprintf(stderr, "%s %d\n", __func__, __LINE__);
+    fflush(stderr);
 
     vtd_iommu_lock(s);
     if (!simulate_stuck) {
@@ -2993,6 +2999,7 @@ static void vtd_process_inv_bh(void *opaque)
       } else {
     fprintf(stderr, "%s %d\n", __func__, __LINE__);
         qemu_bh_schedule(inv_bh);
+    fprintf(stderr, "%s %d\n", __func__, __LINE__);
       }
     }
     vtd_iommu_unlock(s);
@@ -4499,14 +4506,15 @@ static void vtd_realize(DeviceState *dev, Error **errp)
                                       g_free, g_free);
     s->vtd_host_iommu_dev = g_hash_table_new_full(vtd_hiod_hash, vtd_hiod_equal,
                                                   g_free, vtd_hiod_destroy);
-    vtd_init(s);
-    pci_setup_iommu(bus, &vtd_iommu_ops, dev);
-
     inv_bh = qemu_bh_new(vtd_process_inv_bh, s);
     inv_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, vtd_inv_timer_cb, s);
     inv_processing_active = false;
     simulate_stuck = false;
-    /* Pseudo address space under root PCI bus. */
+
+    vtd_init(s);
+    pci_setup_iommu(bus, &vtd_iommu_ops, dev);
+
+        /* Pseudo address space under root PCI bus. */
     x86ms->ioapic_as = vtd_host_dma_iommu(bus, s, Q35_PSEUDO_DEVFN_IOAPIC);
     qemu_add_machine_init_done_notifier(&vtd_machine_done_notify);
 }

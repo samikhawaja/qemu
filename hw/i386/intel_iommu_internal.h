@@ -64,6 +64,7 @@
 #define DMAR_IQA_REG            0x90 /* Invalidation queue addr */
 #define DMAR_IQA_REG_HI         0x94
 #define DMAR_ICS_REG            0x9c /* Invalidation complete status */
+#define DMAR_IQER_REG           0xb0
 #define DMAR_IRTA_REG           0xb8 /* Interrupt remapping table addr */
 #define DMAR_IRTA_REG_HI        0xbc
 #define DMAR_IECTL_REG          0xa0 /* Invalidation event control */
@@ -250,6 +251,7 @@
 #define VTD_FSTS_FRI_MASK       0xff00UL
 #define VTD_FSTS_FRI(val)       ((((uint32_t)(val)) << 8) & VTD_FSTS_FRI_MASK)
 #define VTD_FSTS_IQE            (1UL << 4)
+#define VTD_FSTS_ITE            (1UL << 6)
 #define VTD_FSTS_PPF            (1UL << 1)
 #define VTD_FSTS_PFO            1UL
 

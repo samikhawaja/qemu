@@ -1915,11 +1915,17 @@ static bool vtd_do_iommu_translate(VTDAddressSpace *vtd_as, PCIBus *bus,
 
     cc_entry = &vtd_as->context_cache_entry;
 
+    if (source_id == 250)
+	    printf("%s %d iova: %lx\n", __func__, __LINE__, addr);
+
     /* Try to fetch slpte form IOTLB, we don't need RID2PASID logic */
     if (!rid2pasid) {
         iotlb_entry = vtd_lookup_iotlb(s, source_id, pasid, addr);
         if (iotlb_entry) {
-            trace_vtd_iotlb_page_hit(source_id, addr, iotlb_entry->slpte,
+			if (source_id == 250)
+				printf("%s %d\n", __func__, __LINE__);
+
+			trace_vtd_iotlb_page_hit(source_id, addr, iotlb_entry->slpte,
                                      iotlb_entry->domain_id);
             slpte = iotlb_entry->slpte;
             access_flags = iotlb_entry->access_flags;
@@ -1930,12 +1936,16 @@ static bool vtd_do_iommu_translate(VTDAddressSpace *vtd_as, PCIBus *bus,
 
     /* Try to fetch context-entry from cache first */
     if (cc_entry->context_cache_gen == s->context_cache_gen) {
-        trace_vtd_iotlb_cc_hit(bus_num, devfn, cc_entry->context_entry.hi,
+   			if (source_id == 250)
+				printf("%s %d\n", __func__, __LINE__);
+     trace_vtd_iotlb_cc_hit(bus_num, devfn, cc_entry->context_entry.hi,
                                cc_entry->context_entry.lo,
                                cc_entry->context_cache_gen);
         ce = cc_entry->context_entry;
         is_fpd_set = ce.lo & VTD_CONTEXT_ENTRY_FPD;
         if (!is_fpd_set && s->root_scalable) {
+			if (source_id == 250)
+				printf("%s %d\n", __func__, __LINE__);
             ret_fr = vtd_ce_get_pasid_fpd(s, &ce, &is_fpd_set, pasid);
             if (ret_fr) {
                 vtd_report_fault(s, -ret_fr, is_fpd_set,
@@ -1948,10 +1958,14 @@ static bool vtd_do_iommu_translate(VTDAddressSpace *vtd_as, PCIBus *bus,
         ret_fr = vtd_dev_to_context_entry(s, bus_num, devfn, &ce);
         is_fpd_set = ce.lo & VTD_CONTEXT_ENTRY_FPD;
         if (!ret_fr && !is_fpd_set && s->root_scalable) {
-            ret_fr = vtd_ce_get_pasid_fpd(s, &ce, &is_fpd_set, pasid);
+   			if (source_id == 250)
+				printf("%s %d\n", __func__, __LINE__);
+         ret_fr = vtd_ce_get_pasid_fpd(s, &ce, &is_fpd_set, pasid);
         }
         if (ret_fr) {
-            vtd_report_fault(s, -ret_fr, is_fpd_set,
+   			if (source_id == 250)
+				printf("%s %d\n", __func__, __LINE__);
+         vtd_report_fault(s, -ret_fr, is_fpd_set,
                              source_id, addr, is_write,
                              false, 0);
             goto error;
@@ -1997,7 +2011,9 @@ static bool vtd_do_iommu_translate(VTDAddressSpace *vtd_as, PCIBus *bus,
     if (rid2pasid) {
         iotlb_entry = vtd_lookup_iotlb(s, source_id, pasid, addr);
         if (iotlb_entry) {
-            trace_vtd_iotlb_page_hit(source_id, addr, iotlb_entry->slpte,
+   			if (source_id == 250)
+				printf("%s %d\n", __func__, __LINE__);
+         trace_vtd_iotlb_page_hit(source_id, addr, iotlb_entry->slpte,
                                      iotlb_entry->domain_id);
             slpte = iotlb_entry->slpte;
             access_flags = iotlb_entry->access_flags;
@@ -2009,7 +2025,9 @@ static bool vtd_do_iommu_translate(VTDAddressSpace *vtd_as, PCIBus *bus,
     ret_fr = vtd_iova_to_slpte(s, &ce, addr, is_write, &slpte, &level,
                                &reads, &writes, s->aw_bits, pasid);
     if (ret_fr) {
-        vtd_report_fault(s, -ret_fr, is_fpd_set, source_id,
+   			if (source_id == 250)
+				printf("%s %d\n", __func__, __LINE__);
+     vtd_report_fault(s, -ret_fr, is_fpd_set, source_id,
                          addr, is_write, pasid != PCI_NO_PASID, pasid);
         goto error;
     }
@@ -2694,7 +2712,11 @@ static gboolean vtd_hash_remove_by_pasid(gpointer key, gpointer value,
 {
     VTDIOTLBEntry *entry = (VTDIOTLBEntry *)value;
     VTDIOTLBPageInvInfo *info = (VTDIOTLBPageInvInfo *)user_data;
+	bool ret;
 
+	ret =((entry->domain_id == info->domain_id) &&
+            (entry->pasid == info->pasid));
+	printf("%s %d did: %u pasid: %u del: %d\n", __func__, __LINE__, entry->domain_id, entry->pasid, ret);
     return ((entry->domain_id == info->domain_id) &&
             (entry->pasid == info->pasid));
 }
